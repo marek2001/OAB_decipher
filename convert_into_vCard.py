@@ -5,6 +5,7 @@ import math
 import binascii
 from schema import PidTagSchema
 import sys
+import re
 
 # ---------- parsing helpers ----------
 def hexify(prop_id: int) -> str:
@@ -144,19 +145,88 @@ def build_name_components(rec):
     suffix = rec.get("Generation") or rec.get("Suffix") or ""
     return family, given, middle, prefix, suffix
 
+EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+def _strip_type_prefix(addr: str) -> str:
+    """
+    Exchange often stores addresses like:
+      - 'SMTP:primary@domain'
+      - 'smtp:alias@domain'
+      - 'X500:/o=...'
+      - 'EX:/o=...'
+    Return the part after the first colon if present.
+    """
+    if ":" in addr:
+        t, rest = addr.split(":", 1)
+        # keep case-insensitive handling
+        if t.lower() in ("smtp", "mailto", "x500", "ex"):
+            return rest
+    return addr
+
+def _is_legacy_dn(s: str) -> bool:
+    """
+    Detect legacyExchangeDN / X.500 forms:
+      '/o=Org/ou=Group/...'
+      'X500:/o=...'
+      'EX:/o=...'
+    """
+    if not s:
+        return False
+    u = s.strip()
+    if u.startswith("/o="):
+        return True
+    # type-prefixed forms
+    u_upper = u.upper()
+    return u_upper.startswith("X500:/O=") or u_upper.startswith("EX:/O=")
+
+def _is_smtp_addr(s: str) -> bool:
+    """Minimal sanity check for SMTP addresses."""
+    return bool(EMAIL_RE.match(s))
+
 def collect_emails(rec):
-    emails = []
-    for k in ("PrimarySmtpAddress", "SmtpAddress", "EmailAddress", "Email"):
-        v = rec.get(k)
-        if isinstance(v, str) and v and v not in emails:
-            emails.append(v)
+    """
+    Returns only SMTP addresses:
+    - Prefer PrimarySmtpAddress first (if present).
+    - Parse lists like EmailAddresses which may include 'SMTP:'/'smtp:' prefixes.
+    - Filter out X.500/legacyExchangeDN entries.
+    """
+    out = []
+    seen = set()
+
+    def add(addr: str):
+        if not isinstance(addr, str):
+            return
+        addr = addr.strip()
+        if not addr:
+            return
+        # Remove known type prefixes
+        addr_no_type = _strip_type_prefix(addr)
+        # Filter out legacy/X.500
+        if _is_legacy_dn(addr_no_type):
+            return
+        # Only keep plausible SMTP addresses
+        if not _is_smtp_addr(addr_no_type):
+            return
+        key = addr_no_type.lower()
+        if key not in seen:
+            seen.add(key)
+            out.append(addr_no_type)
+
+    # 1) Strong preference: Primary SMTP if present
+    add(rec.get("PrimarySmtpAddress"))
+
+    # 2) Other single-value fields (sometimes used)
+    for k in ("SmtpAddress", "EmailAddress", "Email"):
+        add(rec.get(k))
+
+    # 3) Multi-value fields (often include typed entries like SMTP:/ X500:/ EX:)
     for k in ("EmailAddresses", "EmailAddressList"):
         vs = rec.get(k)
         if isinstance(vs, list):
             for v in vs:
-                if isinstance(v, str) and v and v not in emails:
-                    emails.append(v)
-    return emails
+                add(v)
+
+    return out
 
 def collect_phones(rec):
     pairs = []
