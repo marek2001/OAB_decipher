@@ -4,6 +4,7 @@ from io import BytesIO
 import math
 import binascii
 from schema import PidTagSchema
+import sys
 
 # ---------- parsing helpers ----------
 def hexify(prop_id: int) -> str:
@@ -242,7 +243,7 @@ def write_vcards(records, out_path: str):
 
 # ---------- main ----------
 if __name__ == "__main__":
-    in_path = "udetails.oab"
+    in_path = sys.argv[1] if len(sys.argv) > 1 else "udetails.oab"
     out_path = "contacts.vcf"
     records = parse_oab_details(in_path)
     write_vcards(records, out_path)
