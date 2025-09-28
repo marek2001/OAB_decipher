@@ -3,10 +3,9 @@ from struct import unpack
 from io import BytesIO
 import math
 import binascii
-import sys
 from schema import PidTagSchema
 
-# ---------- parsing helpers (same spirit as your script) ----------
+# ---------- parsing helpers ----------
 def hexify(prop_id: int) -> str:
     return f"{prop_id:#010x}".upper()[2:]
 
@@ -83,8 +82,6 @@ def parse_oab_details(path: str, max_records: int = None):
             for i in indices:
                 key = hexify(OAB_Atts[i])
                 if key not in PidTagSchema:
-                    # skip unknown by best-effort consuming a sized field if any
-                    # (safer would be to know exact type; we just continue)
                     continue
                 name, ptype = PidTagSchema[key]
 
@@ -118,17 +115,12 @@ def parse_oab_details(path: str, max_records: int = None):
 def v_escape(s: str) -> str:
     if s is None:
         return ""
-    # RFC 2426/6350 escaping
     return (s.replace("\\", "\\\\")
             .replace("\n", "\\n")
             .replace(",", "\\,")
             .replace(";", "\\;"))
 
 def fold_line(line: str) -> str:
-    """
-    Fold to 75 octets per RFC. We approximate by 75 characters (safe for ASCII).
-    Continuation lines start with one space.
-    """
     limit = 75
     out = []
     while len(line) > limit:
@@ -153,12 +145,10 @@ def build_name_components(rec):
 
 def collect_emails(rec):
     emails = []
-    # Common fields seen in OAB/Exchange
     for k in ("PrimarySmtpAddress", "SmtpAddress", "EmailAddress", "Email"):
         v = rec.get(k)
         if isinstance(v, str) and v and v not in emails:
             emails.append(v)
-    # Lists
     for k in ("EmailAddresses", "EmailAddressList"):
         vs = rec.get(k)
         if isinstance(vs, list):
@@ -191,11 +181,7 @@ def collect_phones(rec):
     return pairs
 
 def collect_addresses(rec):
-    """Return list of (type, adr_tuple, label) for vCard ADR.
-    ADR format: PO Box;Extended;Street;City;Region;PostalCode;Country
-    """
     addrs = []
-    # Business
     b_street = rec.get("BusinessAddressStreet") or rec.get("StreetAddress") or ""
     b_city   = rec.get("BusinessAddressCity") or rec.get("Locality") or ""
     b_state  = rec.get("BusinessAddressStateOrProvince") or rec.get("StateOrProvince") or ""
@@ -203,8 +189,6 @@ def collect_addresses(rec):
     b_ctry   = rec.get("BusinessAddressCountry") or rec.get("Country") or ""
     if any([b_street, b_city, b_state, b_post, b_ctry]):
         addrs.append(("WORK", ("", "", b_street, b_city, b_state, b_post, b_ctry), None))
-
-    # Home
     h_street = rec.get("HomeAddressStreet") or ""
     h_city   = rec.get("HomeAddressCity") or ""
     h_state  = rec.get("HomeAddressStateOrProvince") or ""
@@ -216,14 +200,10 @@ def collect_addresses(rec):
 
 def record_to_vcard(rec) -> str:
     lines = ["BEGIN:VCARD", "VERSION:3.0"]
-
-    # N / FN
     family, given, middle, prefix, suffix = build_name_components(rec)
     lines.append(fold_line(f"N:{v_escape(family)};{v_escape(given)};{v_escape(middle)};{v_escape(prefix)};{v_escape(suffix)}"))
     fn = rec.get("DisplayName") or " ".join([p for p in (prefix, given, middle, family, suffix) if p])
     add_if(lines, "FN", fn)
-
-    # ORG / TITLE / ROLE / DEPT
     org = rec.get("CompanyName") or ""
     dept = rec.get("DepartmentName") or ""
     if org and dept:
@@ -232,40 +212,26 @@ def record_to_vcard(rec) -> str:
         add_if(lines, "ORG", org)
     add_if(lines, "TITLE", rec.get("Title"))
     add_if(lines, "ROLE", rec.get("Profession") or rec.get("JobRole"))
-
-    # EMAIL(s)
     emails = collect_emails(rec)
     if emails:
-        # mark first as PREF
         add_if(lines, "EMAIL", emails[0], params=["TYPE=INTERNET", "TYPE=PREF"])
         for e in emails[1:]:
             add_if(lines, "EMAIL", e, params=["TYPE=INTERNET"])
-
-    # TEL(s)
     for params, number in collect_phones(rec):
         add_if(lines, "TEL", number, params=[f"TYPE={params}"])
-
-    # ADR(s)
-    for kind, adr, _label in collect_addresses(rec):
+    for kind, adr, _ in collect_addresses(rec):
         po, ext, street, city, region, code, country = adr
         adr_value = ";".join(v_escape(x) for x in (po, ext, street, city, region, code, country))
         lines.append(fold_line(f"ADR;TYPE={kind}:{adr_value}"))
-
-    # URL
     add_if(lines, "URL", rec.get("WebPage") or rec.get("BusinessHomePage"))
-
-    # ORG extras
     add_if(lines, "X-ASSISTANT", rec.get("Assistant"))
     add_if(lines, "X-OFFICE-LOCATION", rec.get("OfficeLocation"))
-
-    # NOTE
     note_bits = []
     for key in ("ManagerName", "SpouseName", "Hobby", "Notes"):
         if rec.get(key):
             note_bits.append(f"{key}: {rec[key]}")
     if note_bits:
         add_if(lines, "NOTE", " | ".join(note_bits))
-
     lines.append("END:VCARD")
     return "\r\n".join(lines) + "\r\n"
 
@@ -274,15 +240,10 @@ def write_vcards(records, out_path: str):
         for rec in records:
             f.write(record_to_vcard(rec))
 
-# ---------- CLI ----------
+# ---------- main ----------
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("Usage: python oab_to_vcard.py udetails.oab [out.vcf] [max_records]")
-        sys.exit(1)
-    in_path = sys.argv[1]
-    out_path = sys.argv[2] if len(sys.argv) > 2 else "contacts.vcf"
-    maxrecs = int(sys.argv[3]) if len(sys.argv) > 3 else None
-
-    records = parse_oab_details(in_path, max_records=maxrecs)
+    in_path = "udetails.oab"
+    out_path = "contacts.vcf"
+    records = parse_oab_details(in_path)
     write_vcards(records, out_path)
     print(f"Exported {len(records)} contacts to {out_path}")
